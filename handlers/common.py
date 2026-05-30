@@ -15,7 +15,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик /start — полностью сбрасывает все диалоги и показывает приветствие."""
     
     # === ПОЛНЫЙ СБРОС ВСЕХ ДИАЛОГОВ ===
-    # Очищаем все данные пользователя — это завершит все ConversationHandler'ы
     context.user_data.clear()
     
     user = update.effective_user
@@ -69,6 +68,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except:
             pass
+    
+    # ============ НОВОЕ: Проверка deep link от KontentFabrik ============
+    if context.args and context.args[0].startswith("kf_"):
+        head_user_id = int(context.args[0].split("_")[1])
+        import asyncio
+        from head_notify import notify_user_bound
+        asyncio.create_task(notify_user_bound(user.id, head_user_id))
+        logger.info(f"🔗 User {user.id} came from KontentFabrik (head={head_user_id})")
+    # =================================================================
     
     welcome = f"👋 Привет, {user.first_name or 'пользователь'}!\n\n"
     welcome += "Я бот для автоматического парсинга и публикации постов в Telegram.\n\n"
