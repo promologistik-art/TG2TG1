@@ -8,6 +8,15 @@ class Config:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
     
+    # === Идентификация клона ===
+    BOT_TYPE = os.getenv("BOT_TYPE", "tg2tg")
+    CLONE_ID = int(os.getenv("CLONE_ID", "1"))
+    BOT_USERNAME = os.getenv("BOT_USERNAME", "")
+    API_PORT = int(os.getenv("API_PORT", "8000"))
+    
+    # URL головного бота KontentFabrik для уведомлений
+    HEAD_PARSER_URL = os.getenv("HEAD_PARSER_URL", "http://localhost:8000")
+    
     # Лимиты по умолчанию
     DEFAULT_MAX_PROJECTS = int(os.getenv("DEFAULT_MAX_PROJECTS", "1"))
     DEFAULT_MAX_SOURCES_PER_PROJECT = int(os.getenv("DEFAULT_MAX_SOURCES_PER_PROJECT", "3"))
@@ -24,12 +33,16 @@ class Config:
     
     TIMEZONE = "Europe/Moscow"
     
-    # Пути — всё в общем хранилище bothost.ru
+    # Пути — всё в общем хранилище Bothost
     SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
     TEMP_DIR = os.path.join(SHARED_DIR, "temp")
     DATA_DIR = os.path.join(SHARED_DIR, "data")
-    DB_PATH = os.path.join(DATA_DIR, "bot.db")
-    BACKUP_DIR = os.path.join(SHARED_DIR, "backups")
+    
+    # === У каждого клона своя БД ===
+    DB_NAME = f"{BOT_TYPE}_{CLONE_ID}.db"
+    DB_PATH = os.path.join(DATA_DIR, DB_NAME)
+    
+    BACKUP_DIR = os.path.join(SHARED_DIR, "backups", f"{BOT_TYPE}_{CLONE_ID}")
     
     # Таймауты
     SCRAPER_TIMEOUT = 30

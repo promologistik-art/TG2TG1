@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simpleparcer Bot
-Version: 2.8.09 (29/05/26)
+Version: 2.8.10 (30/05/26) — added API server for KontentFabrik
 """
 
 import asyncio
@@ -68,7 +68,6 @@ logger = logging.getLogger(__name__)
 
 # === ЗАЩИТА: ОБЁРТКА ДЛЯ handle_project_name ===
 async def safe_handle_project_name(update, context):
-    """Безопасный обработчик названия проекта — жёсткая проверка флага."""
     if not context.user_data.get('awaiting_project_name'):
         return False
     return await handle_project_name(update, context)
@@ -76,7 +75,6 @@ async def safe_handle_project_name(update, context):
 
 # === ЗАЩИТА: ОБЁРТКА ДЛЯ set_signature_input ===
 async def safe_set_signature_input(update, context):
-    """Безопасный обработчик подписи — проверяет, что диалог подписи активен."""
     if not context.user_data.get('temp_project_id'):
         return False
     if context.user_data.get('awaiting_project_name'):
@@ -118,6 +116,15 @@ async def main():
     temp_cleaner = TempCleaner()
     temp_cleaner_task = asyncio.create_task(temp_cleaner.start())
     
+    # ============ API Server для KontentFabrik ============
+    import uvicorn
+    from api_server import api_app
+    
+    api_config = uvicorn.Config(api_app, host="0.0.0.0", port=Config.API_PORT, log_level="info")
+    api_server = uvicorn.Server(api_config)
+    api_task = asyncio.create_task(api_server.serve())
+    logger.info(f"🌐 API server started on port {Config.API_PORT}")
+    
     # ============ Command Handlers ============
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -145,17 +152,14 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_back_callback, pattern="^admin_back$"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin_|user_manage_|tariff_set_|user_tariff_|extend_user_|deactivate_user_|activate_user_|tariff_for_|set_tariff_|admin_set_tariff|admin_extend_trial|admin_deactivate|admin_activate)"))
     
-    # Обработчики для источников
     app.add_handler(CallbackQueryHandler(edit_source_callback, pattern="^edit_source_"))
     app.add_handler(CallbackQueryHandler(delete_source_callback, pattern="^del_source_"))
     app.add_handler(CallbackQueryHandler(confirm_delete_source_callback, pattern="^confirm_delete_source$"))
     app.add_handler(CallbackQueryHandler(cancel_delete_source_callback, pattern="^cancel_delete_source$"))
     app.add_handler(CallbackQueryHandler(back_to_sources_callback, pattern="^back_to_sources$"))
     
-    # Обработчики для целей
     app.add_handler(CallbackQueryHandler(delete_target_callback, pattern="^del_target_"))
     
-    # Обработчики для проектов
     app.add_handler(CallbackQueryHandler(project_menu_callback, pattern="^project_menu_"))
     app.add_handler(CallbackQueryHandler(back_to_projects_callback, pattern="^back_to_projects$"))
     app.add_handler(CallbackQueryHandler(projects_callback, pattern="^(create_project|select_project_|delete_project_|confirm_delete_|cancel_delete|stats_project_|project_sources_|project_change_target_)"))
@@ -368,7 +372,7 @@ async def main():
     await app.start()
     await app.updater.start_polling(allowed_updates=["message", "callback_query"])
     
-    logger.info("🟢 Bot started (version 2.8.09)")
+    logger.info(f"🟢 Bot started — Clone #{Config.CLONE_ID} (version 2.8.10)")
     
     try:
         await asyncio.Event().wait()
@@ -379,6 +383,7 @@ async def main():
         post_scheduler_task.cancel()
         auto_backup_task.cancel()
         temp_cleaner_task.cancel()
+        api_task.cancel()
         await scheduler.stop()
         await post_scheduler.stop()
         await auto_backup.stop()
