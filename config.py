@@ -29,16 +29,10 @@ class Config:
     
     TIMEZONE = "Europe/Moscow"
     
-    # Пути — всё в общем хранилище
+    # Пути
     SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
     TEMP_DIR = os.path.join(SHARED_DIR, "temp")
     DATA_DIR = os.path.join(SHARED_DIR, "data")
-    
-    # === У каждого клона своя БД ===
-    DB_NAME = f"{Config.BOT_TYPE}_{Config.CLONE_ID}.db"
-    DB_PATH = os.path.join(DATA_DIR, DB_NAME)
-    
-    BACKUP_DIR = os.path.join(SHARED_DIR, "backups", f"{Config.BOT_TYPE}_{Config.CLONE_ID}")
     
     # Таймауты
     SCRAPER_TIMEOUT = 30
@@ -60,5 +54,11 @@ class Config:
     def toggle_source_signature(cls):
         cls.SHOW_SOURCE_SIGNATURE = not cls.SHOW_SOURCE_SIGNATURE
         return cls.SHOW_SOURCE_SIGNATURE
+
+
+# === Вычисляется ПОСЛЕ определения класса ===
+Config.DB_NAME = f"{Config.BOT_TYPE}_{Config.CLONE_ID}.db"
+Config.DB_PATH = os.path.join(Config.DATA_DIR, Config.DB_NAME)
+Config.BACKUP_DIR = os.path.join(Config.SHARED_DIR, "backups", f"{Config.BOT_TYPE}_{Config.CLONE_ID}")
 
 Config.validate()
