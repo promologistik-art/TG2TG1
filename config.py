@@ -12,10 +12,6 @@ class Config:
     BOT_TYPE = os.getenv("BOT_TYPE", "tg2tg")
     CLONE_ID = int(os.getenv("CLONE_ID", "1"))
     BOT_USERNAME = os.getenv("BOT_USERNAME", "")
-    API_PORT = int(os.getenv("API_PORT", "8000"))
-    
-    # URL головного бота KontentFabrik для уведомлений
-    HEAD_PARSER_URL = os.getenv("HEAD_PARSER_URL", "http://localhost:8000")
     
     # Лимиты по умолчанию
     DEFAULT_MAX_PROJECTS = int(os.getenv("DEFAULT_MAX_PROJECTS", "1"))
@@ -33,16 +29,16 @@ class Config:
     
     TIMEZONE = "Europe/Moscow"
     
-    # Пути — всё в общем хранилище Bothost
+    # Пути — всё в общем хранилище
     SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
     TEMP_DIR = os.path.join(SHARED_DIR, "temp")
     DATA_DIR = os.path.join(SHARED_DIR, "data")
     
     # === У каждого клона своя БД ===
-    DB_NAME = f"{BOT_TYPE}_{CLONE_ID}.db"
+    DB_NAME = f"{Config.BOT_TYPE}_{Config.CLONE_ID}.db"
     DB_PATH = os.path.join(DATA_DIR, DB_NAME)
     
-    BACKUP_DIR = os.path.join(SHARED_DIR, "backups", f"{BOT_TYPE}_{CLONE_ID}")
+    BACKUP_DIR = os.path.join(SHARED_DIR, "backups", f"{Config.BOT_TYPE}_{Config.CLONE_ID}")
     
     # Таймауты
     SCRAPER_TIMEOUT = 30

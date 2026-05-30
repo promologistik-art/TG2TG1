@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simpleparcer Bot
-Version: 2.8.10 (30/05/26) — added API server for KontentFabrik
+Version: 2.8.11 (30/05/26) — KontentFabrik integration via shared files
 """
 
 import asyncio
@@ -14,6 +14,7 @@ from telegram.ext import (
 
 from config import Config
 from database import init_db
+from worker_reg import register_self
 from handlers import (
     start, help_command, cancel,
     my_projects, projects_callback, project_menu_callback, handle_project_name,
@@ -66,14 +67,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# === ЗАЩИТА: ОБЁРТКА ДЛЯ handle_project_name ===
 async def safe_handle_project_name(update, context):
     if not context.user_data.get('awaiting_project_name'):
         return False
     return await handle_project_name(update, context)
 
 
-# === ЗАЩИТА: ОБЁРТКА ДЛЯ set_signature_input ===
 async def safe_set_signature_input(update, context):
     if not context.user_data.get('temp_project_id'):
         return False
@@ -87,6 +86,9 @@ async def safe_set_signature_input(update, context):
 async def main():
     await init_db()
     logger.info("Database initialized")
+    
+    # === Регистрируем клона в общем реестре ===
+    register_self()
     
     app = (
         Application.builder()
@@ -115,15 +117,6 @@ async def main():
     
     temp_cleaner = TempCleaner()
     temp_cleaner_task = asyncio.create_task(temp_cleaner.start())
-    
-    # ============ API Server для KontentFabrik ============
-    import uvicorn
-    from api_server import api_app
-    
-    api_config = uvicorn.Config(api_app, host="0.0.0.0", port=Config.API_PORT, log_level="info")
-    api_server = uvicorn.Server(api_config)
-    api_task = asyncio.create_task(api_server.serve())
-    logger.info(f"🌐 API server started on port {Config.API_PORT}")
     
     # ============ Command Handlers ============
     app.add_handler(CommandHandler("start", start))
@@ -372,7 +365,7 @@ async def main():
     await app.start()
     await app.updater.start_polling(allowed_updates=["message", "callback_query"])
     
-    logger.info(f"🟢 Bot started — Clone #{Config.CLONE_ID} (version 2.8.10)")
+    logger.info(f"🟢 Bot started — Clone #{Config.CLONE_ID} (version 2.8.11)")
     
     try:
         await asyncio.Event().wait()
@@ -383,7 +376,6 @@ async def main():
         post_scheduler_task.cancel()
         auto_backup_task.cancel()
         temp_cleaner_task.cancel()
-        api_task.cancel()
         await scheduler.stop()
         await post_scheduler.stop()
         await auto_backup.stop()

@@ -69,14 +69,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     
-    # ============ НОВОЕ: Проверка deep link от KontentFabrik ============
+    # ============ СВЯЗЬ С KONTENTFABRIK ============
     if context.args and context.args[0].startswith("kf_"):
         head_user_id = int(context.args[0].split("_")[1])
-        import asyncio
-        from head_notify import notify_user_bound
-        asyncio.create_task(notify_user_bound(user.id, head_user_id))
-        logger.info(f"🔗 User {user.id} came from KontentFabrik (head={head_user_id})")
-    # =================================================================
+        from worker_reg import save_user_binding
+        save_user_binding(head_user_id, user.id)
+        logger.info(f"🔗 User {user.id} bound to KontentFabrik user {head_user_id}")
+    # =============================================
     
     welcome = f"👋 Привет, {user.first_name or 'пользователь'}!\n\n"
     welcome += "Я бот для автоматического парсинга и публикации постов в Telegram.\n\n"

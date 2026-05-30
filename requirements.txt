@@ -7,5 +7,3 @@ beautifulsoup4==4.12.2
 lxml==4.9.3
 pytz==2023.3
 openpyxl==3.1.2
-fastapi==0.104.1
-uvicorn==0.24.0
