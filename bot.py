@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simpleparcer Bot
-Version: 2.8.11 (30/05/26) — KontentFabrik integration via shared files
+Version: 3.0.0 (30/05/26) — PostgreSQL + KontentFabrik
 """
 
 import asyncio
@@ -87,8 +87,8 @@ async def main():
     await init_db()
     logger.info("Database initialized")
     
-    # === Регистрируем клона в общем реестре ===
-    register_self()
+    # === Регистрируем клона в общей таблице workers ===
+    await register_self()
     
     app = (
         Application.builder()
@@ -365,7 +365,7 @@ async def main():
     await app.start()
     await app.updater.start_polling(allowed_updates=["message", "callback_query"])
     
-    logger.info(f"🟢 Bot started — Clone #{Config.CLONE_ID} (version 2.8.11)")
+    logger.info(f"🟢 Bot started — Clone #{Config.CLONE_ID} (version 3.0.0)")
     
     try:
         await asyncio.Event().wait()

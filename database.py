@@ -1,129 +1,147 @@
 import os
 import logging
-import shutil
+import json
+import sqlite3
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select, text
 from datetime import datetime, timedelta
 from config import Config
-from models import Base, User, Project, SourceChannel, TargetChannel, ParsedPost
+from models import Base, User, Project
 
 logger = logging.getLogger(__name__)
 
-os.makedirs(Config.DATA_DIR, exist_ok=True)
+# Создаём папки для temp и backups
 os.makedirs(Config.TEMP_DIR, exist_ok=True)
 os.makedirs(Config.BACKUP_DIR, exist_ok=True)
 
-old_db_path = "bot.db"
-if os.path.exists(old_db_path) and not os.path.exists(Config.DB_PATH):
-    shutil.move(old_db_path, Config.DB_PATH)
-    logger.info(f"Moved database from {old_db_path} to {Config.DB_PATH}")
+DATABASE_URL = Config.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-engine = create_async_engine(f"sqlite+aiosqlite:///{Config.DB_PATH}", echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False, pool_size=5, max_overflow=10)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
-# Кэш для быстрой проверки спарсенных постов
-# Формат: {"project_id:post_url": True}
+# Кэш спарсенных URL
 parsed_urls = {}
 
 
-async def migrate_to_projects():
+async def _migrate_from_sqlite():
+    """
+    Автоматическая миграция данных из SQLite в PostgreSQL.
+    Ищет bot.db в текущей директории и /app/shared/data/.
+    После миграции переименовывает файл в bot.db.migrated.
+    """
+    # Где искать старую БД
+    search_paths = [
+        "bot.db",
+        os.path.join(Config.DATA_DIR, "bot.db"),
+        os.path.join(Config.SHARED_DIR, "bot.db"),
+        "/app/bot.db",
+    ]
+    
+    sqlite_path = None
+    for path in search_paths:
+        if os.path.exists(path):
+            sqlite_path = path
+            break
+    
+    if not sqlite_path:
+        logger.info("ℹ️ Старая SQLite БД не найдена — миграция не требуется")
+        return False
+    
+    logger.info(f"🔍 Найдена старая БД: {sqlite_path}")
+    
+    # Проверяем, есть ли уже данные в PostgreSQL
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='projects'")
-        )
-        if not result.scalar():
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("Created new tables")
-            
-            result = await session.execute(select(User))
-            users = result.scalars().all()
-            
-            for user in users:
-                result = await session.execute(select(SourceChannel).where(SourceChannel.user_id == user.telegram_id))
-                old_sources = result.scalars().all()
-                result = await session.execute(select(TargetChannel).where(TargetChannel.user_id == user.telegram_id))
-                old_targets = result.scalars().all()
-                
-                if old_sources or old_targets:
-                    project = Project(user_id=user.telegram_id, name="Основной", check_interval_minutes=60)
-                    session.add(project)
-                    await session.flush()
-                    for source in old_sources:
-                        source.project_id = project.id
-                    for target in old_targets:
-                        target.project_id = project.id
-                    logger.info(f"Migrated user {user.telegram_id}")
-            
-            await session.commit()
-            logger.info("Migration completed")
-        
-        # Существующие миграции
-        migrations = [
-            "ALTER TABLE users ADD COLUMN max_projects INTEGER DEFAULT 1",
-            "ALTER TABLE users ADD COLUMN max_sources_per_project INTEGER DEFAULT 3",
-            "ALTER TABLE users ADD COLUMN trial_ends_at TIMESTAMP",
-            "ALTER TABLE users ADD COLUMN subscription_active BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE users ADD COLUMN subscription_ends_at TIMESTAMP",
-            "ALTER TABLE users ADD COLUMN tariff TEXT DEFAULT 'trial'",
-            "ALTER TABLE users ADD COLUMN min_post_interval_minutes INTEGER DEFAULT 120",
-            "ALTER TABLE users ADD COLUMN min_check_interval_minutes INTEGER DEFAULT 60",
-            "ALTER TABLE users ADD COLUMN last_trial_warning_sent TIMESTAMP",
-            "ALTER TABLE users ADD COLUMN last_subscription_warning_sent TIMESTAMP",
-            "ALTER TABLE projects ADD COLUMN signature TEXT",
-            "ALTER TABLE source_channels ADD COLUMN media_filter TEXT DEFAULT 'all'",
-            "ALTER TABLE source_channels ADD COLUMN remove_original_text BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE source_channels ADD COLUMN max_video_duration INTEGER",
-            "ALTER TABLE source_channels ADD COLUMN exclude_phrases TEXT",
-            "ALTER TABLE target_channels ADD COLUMN platform TEXT DEFAULT 'telegram'",
-            "ALTER TABLE target_channels ADD COLUMN vk_token TEXT",
-            "ALTER TABLE target_channels ADD COLUMN vk_group_id BIGINT",
-            "ALTER TABLE target_channels ADD COLUMN vk_group_name TEXT",
-            "ALTER TABLE post_queue ADD COLUMN platform TEXT DEFAULT 'telegram'",
-            "ALTER TABLE published_posts ADD COLUMN platform TEXT DEFAULT 'telegram'",
-            "ALTER TABLE parsed_posts ADD COLUMN project_id INTEGER REFERENCES projects(id)",
-        ]
-        
-        for sql in migrations:
+        result = await session.execute(select(User).limit(1))
+        if result.scalar_one_or_none():
+            logger.info("ℹ️ В PostgreSQL уже есть данные — миграция пропущена")
+            # Переименовываем старый файл чтобы не мешал
             try:
-                await session.execute(text(sql))
+                os.rename(sqlite_path, sqlite_path + ".migrated")
+            except:
+                pass
+            return False
+    
+    # Читаем SQLite
+    try:
+        conn = sqlite3.connect(sqlite_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Получаем список таблиц
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        tables = [row["name"] for row in cursor.fetchall()]
+        logger.info(f"📋 Таблицы SQLite: {tables}")
+        
+        total_rows = 0
+        
+        for table in tables:
+            try:
+                cursor.execute(f"SELECT * FROM {table}")
+                rows = [dict(row) for row in cursor.fetchall()]
+                
+                if not rows:
+                    continue
+                
+                pg_table = f"{Config.TABLE_PREFIX}{table}"
+                
+                # Вставляем в PostgreSQL
+                async with engine.begin() as pg_conn:
+                    for row in rows:
+                        clean_row = {}
+                        for key, value in row.items():
+                            if value is None:
+                                clean_row[key] = None
+                            elif isinstance(value, str) and (value.startswith("{") or value.startswith("[")):
+                                try:
+                                    clean_row[key] = json.loads(value)
+                                except:
+                                    clean_row[key] = value
+                            else:
+                                clean_row[key] = value
+                        
+                        columns = ", ".join(clean_row.keys())
+                        placeholders = ", ".join([f":{k}" for k in clean_row.keys()])
+                        
+                        try:
+                            await pg_conn.execute(
+                                text(f"INSERT INTO {pg_table} ({columns}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"),
+                                clean_row
+                            )
+                        except Exception as e:
+                            logger.debug(f"  Пропущена строка в {table}: {e}")
+                
+                logger.info(f"  ✅ {table}: {len(rows)} строк")
+                total_rows += len(rows)
+                
             except Exception as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.debug(f"Migration {sql[:50]}... skipped: {e}")
+                logger.warning(f"  ⚠️ Таблица {table}: {e}")
         
-        # НОВЫЕ МИГРАЦИИ для ключевых слов и возраста постов
+        conn.close()
+        
+        # Переименовываем старый файл
         try:
-            await session.execute(text("ALTER TABLE source_channels ADD COLUMN include_keywords TEXT"))
-            logger.info("Added column include_keywords to source_channels")
+            os.rename(sqlite_path, sqlite_path + ".migrated")
+            logger.info(f"📁 Старая БД переименована: {sqlite_path}.migrated")
         except Exception as e:
-            if "duplicate column name" not in str(e).lower():
-                logger.warning(f"Failed to add include_keywords: {e}")
+            logger.warning(f"Не удалось переименовать: {e}")
         
-        try:
-            await session.execute(text("ALTER TABLE source_channels ADD COLUMN max_age_hours INTEGER DEFAULT 24"))
-            logger.info("Added column max_age_hours to source_channels")
-        except Exception as e:
-            if "duplicate column name" not in str(e).lower():
-                logger.warning(f"Failed to add max_age_hours: {e}")
+        logger.info(f"🎉 Миграция завершена! Перенесено {total_rows} строк в PostgreSQL (префикс: {Config.TABLE_PREFIX})")
+        return True
         
-        try:
-            await session.execute(text("UPDATE parsed_posts SET project_id = (SELECT project_id FROM source_channels WHERE source_channels.id = parsed_posts.source_channel_id) WHERE project_id IS NULL"))
-        except:
-            pass
-        
-        try:
-            await session.execute(text("UPDATE users SET trial_ends_at = datetime(created_at, '+5 days') WHERE trial_ends_at IS NULL"))
-        except:
-            pass
-        
-        await session.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка миграции: {e}")
+        return False
 
 
 async def init_db():
+    # Создаём таблицы в PostgreSQL
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await migrate_to_projects()
     
+    # Пробуем мигрировать данные из SQLite
+    await _migrate_from_sqlite()
+    
+    # Создаём админа
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.telegram_id == Config.ADMIN_ID))
         admin = result.scalar_one_or_none()
@@ -139,22 +157,27 @@ async def init_db():
             await session.commit()
             logger.info("Admin created")
         
-        result = await session.execute(select(Project).where(Project.user_id == Config.ADMIN_ID).order_by(Project.id))
+        # Создаём дефолтный проект для админа
+        result = await session.execute(
+            select(Project).where(Project.user_id == Config.ADMIN_ID)
+        )
         if not result.scalars().all():
             project = Project(user_id=Config.ADMIN_ID, name="Админский")
             session.add(project)
             await session.commit()
+    
+    logger.info(f"✅ Database initialized (prefix: {Config.TABLE_PREFIX})")
 
 
 async def is_post_parsed(project_id: int, post_url: str) -> bool:
-    """Проверяет, был ли пост уже спарсен (сначала кэш, потом БД)."""
     cache_key = f"{project_id}:{post_url}"
     if cache_key in parsed_urls:
         return True
     async with AsyncSessionLocal() as session:
+        from models import ParsedPost
         result = await session.execute(
             select(ParsedPost).where(
-                ParsedPost.project_id == project_id, 
+                ParsedPost.project_id == project_id,
                 ParsedPost.post_url == post_url
             )
         )
@@ -165,21 +188,21 @@ async def is_post_parsed(project_id: int, post_url: str) -> bool:
 
 
 async def mark_post_parsed(project_id: int, source_channel_id: int, post_url: str):
-    """Отмечает пост как спарсенный (в кэше и в БД)."""
     cache_key = f"{project_id}:{post_url}"
     parsed_urls[cache_key] = True
     async with AsyncSessionLocal() as session:
+        from models import ParsedPost
         result = await session.execute(
             select(ParsedPost).where(
-                ParsedPost.project_id == project_id, 
+                ParsedPost.project_id == project_id,
                 ParsedPost.post_url == post_url
             )
         )
         if result.scalar_one_or_none():
             return
         post = ParsedPost(
-            project_id=project_id, 
-            source_channel_id=source_channel_id, 
+            project_id=project_id,
+            source_channel_id=source_channel_id,
             post_url=post_url
         )
         session.add(post)
@@ -190,49 +213,6 @@ async def mark_post_parsed(project_id: int, source_channel_id: int, post_url: st
 
 
 async def clear_parsed_cache():
-    """Очищает кэш спарсенных URL'ов. Вызывается ежедневно в 9:00."""
     count = len(parsed_urls)
     parsed_urls.clear()
-    logger.info(f"🧹 Parsed URLs cache cleared ({count} entries removed)")
-
-
-async def get_active_projects():
-    """Возвращает все активные проекты."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Project).where(Project.is_active == True)
-        )
-        return result.scalars().all()
-
-
-async def get_user_projects(telegram_id: int):
-    """Возвращает активные проекты пользователя."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Project).where(
-                Project.user_id == telegram_id, 
-                Project.is_active == True
-            )
-        )
-        return result.scalars().all()
-
-
-async def get_project_sources(project_id: int):
-    """Возвращает активные источники проекта."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(SourceChannel).where(
-                SourceChannel.project_id == project_id, 
-                SourceChannel.is_active == True
-            )
-        )
-        return result.scalars().all()
-
-
-async def get_project_target(project_id: int):
-    """Возвращает целевой канал проекта."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(TargetChannel).where(TargetChannel.project_id == project_id)
-        )
-        return result.scalar_one_or_none()
+    logger.info(f"🧹 Parsed URLs cache cleared ({count} entries)")
