@@ -1,144 +1,131 @@
 import os
-import shutil
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+from sqlalchemy import text
+from database import engine, AsyncSessionLocal
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class BackupService:
+    """Бэкап PostgreSQL через pg_dump в SQL-файл"""
+    
     def __init__(self):
         self.backup_dir = Path(Config.BACKUP_DIR)
-        self.db_path = Path(Config.DB_PATH)
-        self.max_backups = 7  # Хранить последние 7 бэкапов
-        
-    def create_backup(self) -> str:
-        """Создать бэкап базы данных."""
-        if not self.db_path.exists():
-            logger.error(f"Database file not found: {self.db_path}")
-            return None
-        
-        # Формат: bot(ДД.ММ.ГГГГ).db
-        date_str = datetime.now().strftime("%d.%m.%Y")
-        backup_name = f"bot({date_str}).db"
+        self.max_backups = 7
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+    
+    async def create_backup(self) -> str:
+        """Создать SQL-дамп базы данных."""
+        date_str = datetime.now().strftime("%d.%m.%Y_%H.%M.%S")
+        backup_name = f"backup_{Config.TABLE_PREFIX}{date_str}.sql"
         backup_path = self.backup_dir / backup_name
         
-        # Если файл с таким именем уже есть — добавляем время
-        if backup_path.exists():
-            time_str = datetime.now().strftime("%H.%M.%S")
-            backup_name = f"bot({date_str} {time_str}).db"
-            backup_path = self.backup_dir / backup_name
-        
         try:
-            # Копируем файл базы данных
-            shutil.copy2(self.db_path, backup_path)
-            logger.info(f"✅ Backup created: {backup_name}")
+            # Используем pg_dump через shell
+            db_url = Config.DATABASE_URL
+            # Извлекаем параметры из URL
+            # postgresql://user:pass@host:port/dbname
+            url_part = db_url.replace("postgresql://", "")
+            user_pass, host_db = url_part.split("@")
+            user, password = user_pass.split(":")
+            host_port, dbname = host_db.split("/")
+            host, port = host_port.split(":")
             
-            # Удаляем старые бэкапы
-            self._cleanup_old_backups()
+            env = os.environ.copy()
+            env["PGPASSWORD"] = password
             
-            return str(backup_path)
+            cmd = [
+                "pg_dump",
+                "-h", host,
+                "-p", port,
+                "-U", user,
+                "-d", dbname,
+                "-f", str(backup_path),
+                "--no-owner",
+                "--no-acl"
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                logger.info(f"✅ Backup created: {backup_name}")
+                self._cleanup_old_backups()
+                return str(backup_path)
+            else:
+                logger.error(f"pg_dump failed: {stderr.decode()}")
+                return None
+                
+        except FileNotFoundError:
+            # pg_dump не установлен — сохраняем текстовый лог
+            logger.warning("pg_dump not found, creating text backup")
+            return await self._create_text_backup(backup_path)
         except Exception as e:
-            logger.error(f"Failed to create backup: {e}")
+            logger.error(f"Backup failed: {e}")
+            return None
+    
+    async def _create_text_backup(self, backup_path: Path) -> str:
+        """Создать текстовый бэкап (список таблиц и количество строк)"""
+        try:
+            async with AsyncSessionLocal() as session:
+                # Список таблиц
+                result = await session.execute(
+                    text("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'")
+                )
+                tables = [row[0] for row in result.fetchall()]
+                
+                with open(backup_path, "w") as f:
+                    f.write(f"-- Backup created: {datetime.now()}\n\n")
+                    for table in tables:
+                        result = await session.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                        count = result.scalar()
+                        f.write(f"-- {table}: {count} rows\n")
+                
+                logger.info(f"✅ Text backup created: {backup_path.name}")
+                return str(backup_path)
+        except Exception as e:
+            logger.error(f"Text backup failed: {e}")
             return None
     
     def _cleanup_old_backups(self):
-        """Удалить старые бэкапы, оставить только последние max_backups."""
+        """Удалить старые бэкапы."""
         try:
-            backups = sorted(self.backup_dir.glob("bot(*).db"))
-            
+            backups = sorted(self.backup_dir.glob("backup_*"))
             if len(backups) > self.max_backups:
-                for old_backup in backups[:-self.max_backups]:
-                    old_backup.unlink()
-                    logger.info(f"🗑️ Deleted old backup: {old_backup.name}")
+                for old in backups[:-self.max_backups]:
+                    old.unlink()
+                    logger.info(f"🗑️ Deleted old backup: {old.name}")
         except Exception as e:
-            logger.error(f"Failed to cleanup old backups: {e}")
-    
-    def restore_backup(self, backup_path: str) -> bool:
-        """Восстановить базу данных из бэкапа."""
-        backup_file = Path(backup_path)
-        
-        if not backup_file.exists():
-            logger.error(f"Backup file not found: {backup_path}")
-            return False
-        
-        try:
-            # Создаём бэкап текущей базы перед восстановлением
-            if self.db_path.exists():
-                date_str = datetime.now().strftime("%d.%m.%Y")
-                pre_restore_backup = self.backup_dir / f"bot(pre_restore {date_str}).db"
-                shutil.copy2(self.db_path, pre_restore_backup)
-                logger.info(f"📦 Pre-restore backup created: {pre_restore_backup.name}")
-            
-            # Восстанавливаем из бэкапа
-            shutil.copy2(backup_file, self.db_path)
-            logger.info(f"✅ Database restored from: {backup_file.name}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to restore backup: {e}")
-            return False
+            logger.error(f"Cleanup failed: {e}")
     
     def list_backups(self) -> list:
-        """Получить список всех бэкапов."""
+        """Список бэкапов."""
         try:
-            backups = sorted(self.backup_dir.glob("bot(*).db"), reverse=True)
-            
-            backup_list = []
-            for backup in backups:
-                stat = backup.stat()
-                size_mb = stat.st_size / (1024 * 1024)
-                created = datetime.fromtimestamp(stat.st_mtime)
-                
-                backup_list.append({
-                    "name": backup.name,
-                    "path": str(backup),
-                    "size_mb": round(size_mb, 2),
-                    "created": created.strftime("%d.%m.%Y %H:%M:%S"),
-                    "timestamp": stat.st_mtime
+            backups = sorted(self.backup_dir.glob("backup_*"), reverse=True)
+            result = []
+            for b in backups:
+                stat = b.stat()
+                result.append({
+                    "name": b.name,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "created": datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M")
                 })
-            
-            return backup_list
-        except Exception as e:
-            logger.error(f"Failed to list backups: {e}")
+            return result
+        except:
             return []
-    
-    def get_backup_info(self, backup_name: str) -> dict:
-        """Получить информацию о конкретном бэкапе."""
-        backup_path = self.backup_dir / backup_name
-        
-        if not backup_path.exists():
-            return None
-        
-        stat = backup_path.stat()
-        return {
-            "name": backup_name,
-            "path": str(backup_path),
-            "size_mb": round(stat.st_size / (1024 * 1024), 2),
-            "created": datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M:%S")
-        }
-    
-    def delete_backup(self, backup_name: str) -> bool:
-        """Удалить конкретный бэкап."""
-        backup_path = self.backup_dir / backup_name
-        
-        if not backup_path.exists():
-            return False
-        
-        try:
-            backup_path.unlink()
-            logger.info(f"🗑️ Backup deleted: {backup_name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete backup: {e}")
-            return False
 
 
 class AutoBackup:
-    """Автоматическое создание бэкапов по расписанию."""
+    """Автоматический бэкап раз в сутки"""
     
     def __init__(self, backup_service: BackupService):
         self.backup_service = backup_service
@@ -146,55 +133,31 @@ class AutoBackup:
         self._task = None
     
     async def start(self):
-        """Запустить авто-бэкап."""
         self._running = True
         self._task = asyncio.create_task(self._backup_loop())
         logger.info("🟢 AutoBackup started (daily at 03:00 MSK)")
     
     async def _backup_loop(self):
-        """Цикл создания бэкапов."""
-        while self._running:
-            try:
-                # Ждём до 3:00 MSK
-                await self._wait_until_backup_time()
-                
-                if self._running:
-                    # Создаём бэкап
-                    backup_path = self.backup_service.create_backup()
-                    if backup_path:
-                        logger.info(f"📦 Daily backup created: {backup_path}")
-                    
-                    # Ждём минуту, чтобы не создавать несколько бэкапов
-                    await asyncio.sleep(60)
-                    
-            except Exception as e:
-                logger.error(f"AutoBackup error: {e}")
-                await asyncio.sleep(3600)  # Ждём час при ошибке
-    
-    async def _wait_until_backup_time(self):
-        """Ждать до 3:00 MSK."""
         from utils import get_moscow_time
         
         while self._running:
-            now = get_moscow_time()
-            
-            # Целевое время: сегодня в 3:00
-            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
-            
-            if now >= target:
-                # Если уже прошло 3:00, ждём до завтра
-                target = target + timedelta(days=1)
-            
-            wait_seconds = (target - now).total_seconds()
-            
-            if wait_seconds > 0:
-                logger.debug(f"Next backup in {wait_seconds / 3600:.1f} hours")
-                await asyncio.sleep(min(wait_seconds, 3600))  # Проверяем каждый час
-            else:
-                break
+            try:
+                now = get_moscow_time()
+                target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    target += timedelta(days=1)
+                
+                wait = (target - now).total_seconds()
+                await asyncio.sleep(min(wait, 3600))
+                
+                if self._running:
+                    await self.backup_service.create_backup()
+                    await asyncio.sleep(60)
+            except Exception as e:
+                logger.error(f"AutoBackup error: {e}")
+                await asyncio.sleep(3600)
     
     async def stop(self):
-        """Остановить авто-бэкап."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
