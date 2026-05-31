@@ -19,8 +19,9 @@ class Config:
     # PostgreSQL
     DATABASE_URL = os.getenv("DATABASE_URL")
     
-    # Пути (для временных файлов и бекапов)
+    # Пути
     SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
+    DATA_DIR = os.path.join(SHARED_DIR, "data")
     TEMP_DIR = os.path.join(SHARED_DIR, "temp")
     BACKUP_DIR = os.path.join(SHARED_DIR, "backups", f"{BOT_TYPE}_{CLONE_ID}")
     
