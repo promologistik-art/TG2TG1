@@ -72,9 +72,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ============ СВЯЗЬ С KONTENTFABRIK ============
     if context.args and context.args[0].startswith("kf_"):
         head_user_id = int(context.args[0].split("_")[1])
-        import asyncio
         from worker_reg import save_user_binding
-        asyncio.create_task(save_user_binding(head_user_id, user.id))
+        await save_user_binding(head_user_id, user.id)
         logger.info(f"🔗 User {user.id} bound to KontentFabrik user {head_user_id}")
     # =============================================
     
