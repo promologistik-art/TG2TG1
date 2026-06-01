@@ -47,54 +47,94 @@ class Scheduler:
                 logger.info("🧹 Parsed URLs cache cleared (daily)")
 
     async def _send_daily_report(self):
+        """Отправляет админу отчёт за вчерашний день."""
         try:
+            now = datetime.utcnow()
+            yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
             async with AsyncSessionLocal() as session:
+                # Все пользователи
                 result = await session.execute(select(User))
                 users = result.scalars().all()
                 users_count = len(users)
                 
+                # Активные проекты
                 result = await session.execute(select(Project).where(Project.is_active == True))
                 projects = result.scalars().all()
                 projects_count = len(projects)
                 
+                # Активные источники
                 result = await session.execute(
                     select(SourceChannel).where(SourceChannel.is_active == True)
                 )
                 sources = result.scalars().all()
                 sources_count = len(sources)
                 
-                total_parsed = sum(p.posts_parsed_today for p in projects)
-                total_posted = sum(p.posts_posted_today for p in projects)
+                # Спарсено за вчера (по created_at очереди)
+                result = await session.execute(
+                    select(PostQueue).where(
+                        PostQueue.created_at >= yesterday,
+                        PostQueue.created_at < today_start
+                    )
+                )
+                total_parsed = len(result.scalars().all())
                 
+                # Опубликовано за вчера
+                result = await session.execute(
+                    select(PostQueue).where(
+                        PostQueue.status == "published",
+                        PostQueue.published_at >= yesterday,
+                        PostQueue.published_at < today_start
+                    )
+                )
+                published_posts = result.scalars().all()
+                total_posted = len(published_posts)
+                
+                # Топ-3 проекта за вчера
+                project_posted = {}
+                for p in published_posts:
+                    project_posted[p.project_id] = project_posted.get(p.project_id, 0) + 1
+                
+                top3_ids = sorted(project_posted, key=project_posted.get, reverse=True)[:3]
+                top3 = []
+                for pid in top3_ids:
+                    for p in projects:
+                        if p.id == pid:
+                            top3.append((p.name, project_posted[pid]))
+                            break
+                
+                # В очереди сейчас
                 result = await session.execute(
                     select(PostQueue).where(PostQueue.status == "pending")
                 )
                 pending = len(result.scalars().all())
                 
+                # Ошибок за вчера
                 result = await session.execute(
-                    select(PostQueue).where(PostQueue.status == "failed")
+                    select(PostQueue).where(
+                        PostQueue.status == "failed",
+                        PostQueue.created_at >= yesterday,
+                        PostQueue.created_at < today_start
+                    )
                 )
                 failed = len(result.scalars().all())
-                
-                sorted_projects = sorted(projects, key=lambda p: p.posts_posted_today, reverse=True)
-                top3 = sorted_projects[:3]
             
-            now = datetime.utcnow()
-            date_str = now.strftime('%d.%m.%Y')
+            yesterday_str = yesterday.strftime('%d.%m.%Y')
             
-            text = f"📊 <b>Отчёт за {date_str}</b>\n\n"
+            text = f"📊 <b>Отчёт за {yesterday_str}</b>\n\n"
             text += f"👥 Пользователей: {users_count}\n"
             text += f"📁 Проектов: {projects_count}\n"
             text += f"📥 Источников: {sources_count}\n"
-            text += f"🔄 Спарсено сегодня: {total_parsed}\n"
-            text += f"📤 Опубликовано сегодня: {total_posted}\n"
+            text += f"🔄 Спарсено: {total_parsed}\n"
+            text += f"📤 Опубликовано: {total_posted}\n"
             text += f"📬 В очереди: {pending}\n"
             text += f"❌ Ошибок публикации: {failed}\n"
             
             if top3:
                 text += f"\n🏆 <b>Топ-{len(top3)} активных проекта:</b>\n"
-                for p in top3:
-                    text += f"• «{p.name}» — {p.posts_posted_today} постов\n"
+                for name, count in top3:
+                    text += f"• «{name}» — {count} постов\n"
             
             from telegram import Bot
             bot = Bot(token=Config.BOT_TOKEN)
@@ -374,8 +414,6 @@ class Scheduler:
             logger.info(f"📤 Found {len(posts_to_publish)} posts to queue")
             
             msk_now = get_moscow_time().replace(tzinfo=None)
-            # post_interval_hours теперь хранит минуты
-            # Config.MIN_POST_INTERVAL_MINUTES убран — ограничение уже в user.min_post_interval_minutes
             interval_minutes = max(
                 project.post_interval_hours,
                 user.min_post_interval_minutes
